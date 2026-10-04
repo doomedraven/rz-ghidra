@@ -3604,21 +3604,3 @@ undefined8 sym.main(void)
 }
 EOF
 RUN
-
-NAME=Golang decompilation with ABI mapping
-FILE=rizin-testbins/golang/go-re-sample-linux-amd64-go121
-CMDS=<<EOF
-aalg
-s sym.main.main
-pdg
-
-NAME=Golang decompilation with ABI mapping
-FILE=rizin-testbins/golang/go-re-sample-linux-amd64-go121
-CMDS=<<EOF
-aalg
-s sym.main.main
-pdg
-EOF
-EXPECT=<<EOF
-EOF
-RUN
