@@ -28,7 +28,9 @@ static const std::map<std::string, std::string> cc_map = {
 		{ "amd64", "__stdcall" },
 		{ "arm64", "__cdecl" },
 		{ "arm32", "__stdcall" },
-		{ "arm16", "__stdcall" } /* not actually __stdcall */
+		{ "arm16", "__stdcall" }, /* not actually __stdcall */
+		{ "golang", "abi-internal" },
+		{ "golang_abi0", "abi0" }
 };
 
 std::string FilenameFromCore(RzCore *core)
@@ -111,18 +113,8 @@ ContextDatabase *RizinArchitecture::getContextDatabase()
 
 void RizinArchitecture::postSpecFile()
 {
-	RzCoreLock core(getCore());
-	RzList *fcns = rz_analysis_function_list(core->analysis);
-	rz_list_foreach_cpp<RzAnalysisFunction>(fcns, [&](RzAnalysisFunction *func) {
-		if (func->is_noreturn)
-		{
-			// Configure noreturn functions
-			Funcdata *infd = symboltab->getGlobalScope()->queryFunction(Address(getDefaultCodeSpace(), func->addr));
-			if(!infd)
-				return;
-			infd->getFuncProto().setNoReturn(true);
-		}
-	});
+	// Configure noreturn functions lazily via <prototype noreturn="..."/> in RizinScope::registerFunction
+	SleighArchitecture::postSpecFile();
 }
 
 void RizinArchitecture::buildAction(DocumentStorage &store)

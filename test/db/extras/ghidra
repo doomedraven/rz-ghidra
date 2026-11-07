@@ -3604,3 +3604,27 @@ undefined8 sym.main(void)
 }
 EOF
 RUN
+
+NAME=Golang decompilation with ABI mapping
+FILE=rizin-testbins/golang/go-re-sample-linux-amd64-go121
+CMDS=<<EOF
+aalg
+s sym.main.main
+pdgss
+pdg ~WARNING,sym.main.main,FlagSet_.Bool,os.Exit
+s sym.flag.__FlagSet_.Bool
+af
+pdg ~sym.flag.__FlagSet_.Bool
+EOF
+EXPECT=<<EOF
+x86:LE:64:default:golang
+void sym.main.main(void)
+    puVar4 = (uint8_t *)sym.flag.__FlagSet_.Bool(puVar2, str.enable, 6, 0, str.enable, 6);
+    // WARNING: Subroutine does not return
+        sym.os.Exit(1);
+    // WARNING: Subroutine does not return
+    // WARNING: Subroutine does not return
+        sym.os.Exit(1);
+sym.flag.__FlagSet_.Bool(int64_t arg1, int64_t arg2, int64_t arg3, undefined8 placeholder_3, int64_t arg5, int64_t arg6)
+EOF
+RUN

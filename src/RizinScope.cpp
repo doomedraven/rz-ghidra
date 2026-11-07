@@ -39,6 +39,42 @@ static std::string hex(ut64 v)
 	return ss.str();
 }
 
+static bool isGolangNoReturnSymbol(const char *name)
+{
+	if(!name || !*name)
+		return false;
+	if(!strncmp(name, "sym.go.", 7))
+		name += 7;
+	else if(!strncmp(name, "sym.", 4))
+		name += 4;
+	if(name[0] != 'r' && name[0] != 'o' && name[0] != 's')
+		return false;
+	if(strstr(name, ".func") || strstr(name, ".deferwrap"))
+		return false;
+	if(!strncmp(name, "runtime.panic", 13))
+		return strncmp(name + 13, "Check", 5) != 0;
+	if(!strncmp(name, "runtime.goPanic", 15))
+		return true;
+	static const char *const noreturn_syms[] = {
+		"runtime.gopanic",
+		"runtime.throw",
+		"runtime.fatalthrow",
+		"runtime.fatal",
+		"runtime.fatalpanic",
+		"runtime.exit",
+		"os.Exit",
+		"syscall.Exit",
+	};
+	for(const char *sym : noreturn_syms)
+	{
+		size_t len = strlen(sym);
+		if(!strncmp(name, sym, len) &&
+		   (name[len] == '\0' || !strcmp(name + len, ".abi0") || !strcmp(name + len, ".abiinternal")))
+			return true;
+	}
+	return false;
+}
+
 static Element *child(Element *el, const std::string &name, const std::map<std::string, std::string> &attrs = {})
 {
 	auto child = new Element(el);
@@ -199,6 +235,20 @@ FunctionSymbol *RizinScope::registerFunction(RzAnalysisFunction *fcn) const
 
 	std::map<RzAnalysisVar *, Datatype *> var_types;
 
+	const bool isGolangRegAbi = fcn->cc && !strcmp(fcn->cc, "golang");
+	auto isEffectiveArg = [&](RzAnalysisVar *var) {
+		if(!rz_analysis_var_is_arg(var))
+			return false;
+		// In Go ABIInternal ("golang"), [entry_rsp + 8..] slots are caller-reserved
+		// register spill slots (written before morestack/calls), not stack parameters,
+		// unless explicitly defined via DWARF or by the user.
+		if(isGolangRegAbi &&
+		   var->storage.type == RZ_ANALYSIS_VAR_STORAGE_STACK &&
+		   var->origin.kind == RZ_ANALYSIS_VAR_ORIGIN_NONE)
+			return false;
+		return true;
+	};
+
 	ParamActive params(false);
 
 	rz_pvector_foreach_cpp<RzAnalysisVar>(&fcn->vars, [&](RzAnalysisVar *var) {
@@ -220,7 +270,7 @@ FunctionSymbol *RizinScope::registerFunction(RzAnalysisFunction *fcn) const
 		}
 		var_types[var] = type;
 
-		if(!rz_analysis_var_is_arg(var))
+		if(!isEffectiveArg(var))
 			return true;
 		auto addr = addrForVar(var, true);
 		if(addr.isInvalid())
@@ -257,7 +307,8 @@ FunctionSymbol *RizinScope::registerFunction(RzAnalysisFunction *fcn) const
 		Datatype *type = type_it->second;
 		bool typelock = true;
 
-		auto addr = addrForVar(var, rz_analysis_var_is_arg(var) /* Already emitted this warning before */);
+		const bool isArg = isEffectiveArg(var);
+		auto addr = addrForVar(var, isArg /* Already emitted this warning before */);
 		if(addr.isInvalid())
 			return true;
 
@@ -286,14 +337,14 @@ FunctionSymbol *RizinScope::registerFunction(RzAnalysisFunction *fcn) const
 		{
 			arch->addWarning("Detected overlap for variable " + to_string(var->name));
 
-			if(rz_analysis_var_is_arg(var)) // Can't have args with typelock=false, otherwise we get segfaults in the Decompiler
+			if(isArg) // Can't have args with typelock=false, otherwise we get segfaults in the Decompiler
 				return true;
 
 			typelock = false;
 		}
 
 		int4 paramIndex = -1;
-		if(rz_analysis_var_is_arg(var))
+		if(isArg)
 		{
 			if(proto && !proto->possibleInputParam(addr, type->getSize()))
 			{
@@ -326,10 +377,10 @@ FunctionSymbol *RizinScope::registerFunction(RzAnalysisFunction *fcn) const
 				{ "typelock", typelock ? "true" : "false" },
 				{ "namelock", "true" },
 				{ "readonly", "false" },
-				{ "cat", rz_analysis_var_is_arg(var) ? "0" : "-1" }
+				{ "cat", isArg ? "0" : "-1" }
 		});
 
-		if(rz_analysis_var_is_arg(var))
+		if(isArg)
 		{
 			if(argsByIndex.size() < paramIndex + 1)
 				argsByIndex.resize(paramIndex + 1, nullptr);
@@ -343,7 +394,7 @@ FunctionSymbol *RizinScope::registerFunction(RzAnalysisFunction *fcn) const
 		childAddr(mapsymElement, "addr", addr);
 
 		auto rangelist = child(mapsymElement, "rangelist");
-		if(rz_analysis_var_is_arg(var) && var->storage.type == RZ_ANALYSIS_VAR_STORAGE_REG)
+		if(isArg && var->storage.type == RZ_ANALYSIS_VAR_STORAGE_REG)
 			childRegRange(rangelist);
 		return true;
 	});
@@ -381,9 +432,13 @@ FunctionSymbol *RizinScope::registerFunction(RzAnalysisFunction *fcn) const
 	int4 extraPop = proto ? proto->getExtraPop() : arch->translate->getDefaultSize();
 	if(extraPop == ProtoModel::extrapop_unknown)
 		extraPop = arch->translate->getDefaultSize();
+	const bool isNoReturn = fcn->is_noreturn ||
+		((!strncmp(fcn->name, "sym.go.", 7) || (fcn->cc && !strncmp(fcn->cc, "golang", 6))) &&
+		 isGolangNoReturnSymbol(fcn->name));
 	auto prototypeElement = child(functionElement, "prototype", {
 			{ "extrapop", to_string(extraPop) },
-			{ "model", proto ? proto->getName() : "unknown" }
+			{ "model", proto ? proto->getName() : "unknown" },
+			{ "noreturn", isNoReturn ? "true" : "false" }
 	});
 
 	Address returnAddr(arch->getSpaceByName("register"), 0);
@@ -434,6 +489,21 @@ FunctionSymbol *RizinScope::registerRelocTarget(RzBinReloc *reloc) const
 Symbol *RizinScope::registerFlag(RzFlagItem *flag) const
 {
 	RzCoreLock core(arch->getCore());
+
+	if(flag->space && !strcmp(flag->space->name, RZ_FLAGS_FS_SYMBOLS))
+	{
+		const char *default_cc = rz_analysis_cc_default(core->analysis);
+		const bool is_go_sym = !strncmp(flag->name, "sym.go.", 7) ||
+			(!strncmp(flag->name, "sym.", 4) && default_cc && !strncmp(default_cc, "golang", 6));
+		if(is_go_sym)
+		{
+			const char *name = (core->flags->realnames && flag->realname) ? flag->realname : flag->name;
+			FunctionSymbol *fsym = cache->addFunction(Address(arch->getDefaultCodeSpace(), flag->offset), name);
+			if(fsym && (rz_analysis_noreturn_at_addr(core->analysis, flag->offset) || isGolangNoReturnSymbol(flag->name)))
+				fsym->getFunction()->getFuncProto().setNoReturn(true);
+			return fsym;
+		}
+	}
 
 	uint4 attr = Varnode::namelock | Varnode::typelock;
 	Datatype *type = nullptr;
